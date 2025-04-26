@@ -1,0 +1,17 @@
+# Unity 自动生成文件
+/[Ll]ibrary/
+/[Tt]emp/
+/[Oo]bj/
+/[Bb]uild/
+/[Bb]uilds/
+/[Ll]ogs/
+/[Uu]ser[Ss]ettings/
+
+# 项目特定缓存
+/.vs/
+/.vscode/
+*.sln
+*.csproj
+*.unityproj
+*.suo
+*.userprefs

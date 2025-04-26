@@ -1,0 +1,22 @@
+1 SRP Init
+asset-pipline-renderpass-camera
+
+2 Batcher、GPUInstancing、透明物渲染
+
+SRP-Batcher：并不是通过减少DrawCall来提速，而是对材质做cache，通过GPU端缓存材质数据 和 动态偏移寻址 实现加速
+这样不同DrawCall就不需要重新绑定Image的纹理、GPU中的shader等。
+要求：
+	Shader 必须使用 CBUFFER，确保 uniform 数据布局固定，GPU 可缓存响应的数据（如颜色等）并计算固定偏移。
+	禁止动态 uniform 结构，如动态数组、条件分支会导致 SRP Batcher 失效。
+
+Shader 变体和clip：
+	Shader 变体是同一 Shader 的不同编译版本，由预处理指令（如 INSTANCING_ON）控制。
+	Unity 根据当前配置（如材质参数）自动匹配变体。
+	合理使用 shader_feature 和 multi_compile 是优化关键，避免变体爆炸。
+	需要防止变体爆炸问题。
+
+3 支持基本的unlit/lit shader、light和多light、基本的经验BRDF渲染
+	最开始的light其实只需要支持法线即可。
+	之后引入经验BRDF
+
+添加详细注释。
