@@ -16,4 +16,4 @@ Current Progress: Cascading Shadows:
 
 **(3) Shadows' optimization such as Cascades and Bias**
 
-See the engineering notes for details.
+See the Note for details.
