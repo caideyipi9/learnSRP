@@ -1,4 +1,4 @@
-# RayTracing Render
+# learnSRP
 
 ## 1 Inspired by Cat-Like-Coding SRP-Tutorial
 
