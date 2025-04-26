@@ -1,0 +1,367 @@
+Custom Render Pipline
+
+总的流程：
+inspector- 实际数据（unity管理）- unity api读入管线 - 缓冲区 - 计算
+统计学：
+	分布猜测法：假设一个东西符合某种分布
+	函数拟合方法： 
+	重要性采样方法：
+
+1 a minimal RP that draws unlit shapes using forward rendering
+
+[文件夹] Custom RP：保存所有和管线相关的文件；
+[文件夹] Runtime：保存Pipline相关的C#脚本：
+	RenderPipelineAsset：创建管线实例和unity交互
+	Pipline：Pipline.Render
+	cameraRender：context+camera是基本数据
+	基本工序：用buffer做context上下文修改+submit commandqueue给gpu
+	即塞入一些指令-执行-清空
+	render target：carema对应的framebuffer，清空的Draw GL其实是用一个特殊的shader跑的。
+
+	Setup：设置相机属性，清空缓冲，（执行当前buffer）
+	拿到camera的Culling参数，传入Context
+		culling在gpu执行shader之前就已经由pipline执行一部分了（cpu-culling）
+		比如放在cullingResults里的那些信息，
+		但是vertex-shader和mesh-shader等也可以执行进一步的gpu-culling
+
+	context实际渲染：cullingResults, drawingSettings, filteringSettings，分别定义了可见、绘制、过滤
+	drawing：
+		可用的shader，每个pass的tag，渲染sort等。
+	filter：过滤器；可以用opaque/transparent控制渲染的顺序
+
+	可以通过多相机（默认同一个framebuffer）+ClearFlag的方法融合多次渲染。
+
+2 shader和batch
+（1）shader-subshader-pass
+
+hlsl：
+	hlsl可以用: position这样的句子和系统交互，表示这个名字代表着pos数据
+
+properties-声明-设置	
+
+cbuffer：draw信息和material信息（memory layout）好好分类！！！！！！
+变量排序建议：
+优先放置大数据类型（如 float4 和矩阵）。
+将较小的数据类型组合起来，确保每组占满 16 字节。
+按 16 字节对齐，填充必要的空隙，避免内存浪费和不正确的数据读取。
+
+避免 CBuffer 尺寸过大
+大多数 GPU 对单个 CBuffer 的大小有一定限制（如 DirectX 11 中每个 CBuffer 最大为 64KB）。
+保持 CBuffer 的尺寸尽可能小，以减少 GPU 读取缓存中的压力，防止缓存溢出。CBuffer 中只存放 Shader 必需的常量数据，避免不必要的内容。
+合理拆分 CBuffer
+如果有些数据在多个绘制调用中不变，可以将这些数据集中在一个 CBuffer 中，而需要频繁更新的数据放入另一个 CBuffer。
+这样可以减少不必要的更新开销，只更新需要变化的 CBuffer，优化性能。
+
+（2）SRP Batcher - GPU Instancing - Shader Variants
+
+（3）透明
+透明物体关闭 ZWrite：因为它是“透明的”
+
+
+（4）着色器变体
+features：
+在着色器代码中
+使用预处理器指令（preprocessor directives）和关键字（keywords）来创建着色器变体（Shader Variants）的技术。
+
+3 方向光
+
+（1）切线空间和法线变换
+（2）包装：可以设置一些简单的抽象
+	方便之后的编码。
+如把法线、颜色等信息放在一个结构体surface中,把光的性质放在light中
+把光线计算的代码放在Lighting中——Lighting(surface)
+GetLighting(surface, GetDirectionalLight())，光+表面+计算模型
+
+（2）注意，光也可以剔除！！！
+scene栏设置光线
+-unity拿到所有可见光并通过关键字
+-把可见光信息传入uniformbuffer
+-cpu把信息传递到gpu的cbuffer之类的地方-计算。
+
+
+（3）最简单的BRDF
+
+可以把BRDF（计算模型）传入GetLighting
+最简单的the metallic workflow：
+	metallic：diffuse
+
+（4）一些特殊的透明性光学计算的处理：
+传统的Alpha混合（使用 blend srcAlpha oneMinusSrcAlpha）会使物体的所有反射（包括镜面反射和漫反射）都根据Alpha值淡出。
+这对于模拟半透明的物体（例如，烟雾或薄纱）是有效的。
+但对于模拟玻璃等材质，这种方法不准确，因为玻璃的镜面反射应该保持完整，即使物体是透明的。
+方法：预先控制
+
+
+4 DirectionalShadows-表达遮挡对光的衰减作用
+	监视器参数设置和可视化：
+（1） Shadow Settings
+把setting传递下去；主要maxDistance可以传递给
+	数据读取和贴图创建：
+（2）Shadow obj
+和light一样，从untiy api读取每个光的shadow，判定它的有效性，然后存进一个数组：
+	数组里的结构体：包括lightIndex等
+（3）创建阴影贴图（Atlas）和渲染上下文指定
+		buffer.GetTemporaryRT(
+			dirShadowAtlasId, atlasSize, atlasSize,
+			32, FilterMode.Bilinear, RenderTextureFormat.Shadowmap
+		);
+接下来切换渲染目标（setRenderTarget）过一边pass再release即可
+这样就可以在shader里控制一张阴影贴图了！
+注意maxDistance很大程度上决定了虚拟相机的视锥体的特性，
+减小最大阴影距离可以提高阴影贴图的分辨率利用率，从而提高阴影的细节。
+合理设置最大阴影距离是提高阴影质量的重要手段。比如
+
+（4）实际渲染阴影贴图
+	上下文设置：
+	平行光阴影的处理：
+		生成一个虚拟的相机，它有vm和pm，再buffer中设置
+		为这个相机计算裁剪数据splitdata，并再shadowSettings中设置好（相当于culling）
+	这样有了相机有了culling，接下来的渲染就和一般的渲染类似了。
+
+	新的pass：
+		Pass {
+			Tags {
+				"LightMode" = "ShadowCaster"
+			}
+
+			ColorMask 0
+
+			HLSLPROGRAM
+			#pragma target 3.5
+			#pragma shader_feature _CLIPPING
+			#pragma multi_compile_instancing
+			#pragma vertex ShadowCasterPassVertex
+			#pragma fragment ShadowCasterPassFragment
+			#include "ShadowCasterPass.hlsl"
+			ENDHLSL
+		}
+		Unity的内置阴影渲染逻辑：
+
+			Unity的渲染管线具有内置的阴影渲染逻辑，可以自动处理阴影投射Pass。
+			当Unity检测到一个Pass的"LightMode"标签为"ShadowCaster"时，它会执行以下操作：
+			设置正确的渲染状态，例如，深度测试、深度写入和裁剪测试。
+			设置正确的渲染目标，即阴影贴图纹理。
+			执行绘制调用，渲染投射阴影的物体。
+			从顶点着色器输出的裁剪空间位置，计算深度信息，并写入深度缓冲区。
+			因此，即使您的片元着色器没有显式输出深度信息，Unity也会自动生成深度信息并写入阴影贴图。
+		2. 深度信息的自动生成：
+			在阴影投射Pass中，深度信息通常是从顶点着色器输出的裁剪空间位置计算得出的。
+			Unity的渲染管线会自动从裁剪空间位置提取深度信息，并将其写入深度缓冲区。
+			这意味着您不需要在片元着色器中显式计算和输出深度信息。
+	这里的片段着色器只执行Clip等基本功能，不做输出。
+
+	多个阴影：假如1024*1024，要渲染4个阴影，指定offset+4个512*512即可。
+（5）终于进入Fragment Shader：sample shadow
+怎么确定纹理坐标？
+	上面的虚拟相机确定的VM和PM，它们的乘积应该传到shader里
+	将世界空间中的sureface坐标通过阴影虚拟相机的WV矩阵变换到虚拟相机空间，这就是纹理坐标。
+
+采样：
+	SAMPLER_CMP:比较采样器，自动执行深度比较；
+流程：
+	首先将世界空间中的sureface坐标通过阴影虚拟相机的WV矩阵变换到虚拟相机空间
+	过一遍比较采样器，比较采样器自动执行坐标和深度贴图的深度值，返回一个衰减值，
+	通过插值表明该位置有多在阴影里。
+	比如0表示该位置在阴影的前面，不受到衰减，等。
+
+这个衰减值本质可以看作渲染方程的一个近似，把积分内的可见项整个拆出来，
+将计算近似为可见性*渲染
+这是因为可见性在局部往往近似常量（平行光源、点光源），而渲染方程非常平滑。
+
+总结：
+surfaceWS是像素对应的插值表面顶点世界坐标，
+把这个坐标变换到虚拟相机空间就可以拿到它在虚拟相机空间的深度（也有可能超过限度导致没有阴影），
+这个深度比贴图采样出来的结果深，说明应该插值出一个阴影。
+
+都是虚拟空间的深度
+
+（6）各种问题：
+1. 自阴影伪影（Self-Shadowing Artifacts）：
+
+问题： 本不应该被阴影覆盖的表面出现了像素化的条带状阴影伪影。
+原因：
+阴影贴图的分辨率是有限的，这意味着每个纹素（texel）在场景中覆盖的区域是有限的。
+由于这种有限的精度，表面上的像素在进行深度比较时，可能会错误地判断自己被其他部分遮挡。
+这导致表面错误地部分遮挡自己，产生不自然的阴影效果，即自阴影。
+改变阴影贴图的分辨率会改变伪影的模式，但无法完全消除它们，因为根本原因是深度信息的不精确。
+影响： 导致阴影质量很差，出现像素化的条带状阴影。
+2. 最大阴影距离（Max Shadow Distance）：
+
+问题： 阴影贴图只覆盖了部分可见区域。
+原因：
+最大阴影距离限制了阴影贴图渲染的场景范围。
+超出这个距离的物体不会被渲染到阴影贴图中，因此也不会产生阴影。
+这导致阴影贴图覆盖的区域小于摄像机可见的区域。
+影响： 调整最大阴影距离会改变阴影贴图覆盖的区域大小，但阴影贴图的对齐方式是与光源方向一致，而不是与相机方向一致。
+3. 阴影贴图的边界问题：
+
+问题： 有些阴影超出最大阴影距离可见，有些阴影缺失，边界采样时阴影效果异常。
+原因：
+阴影贴图的边界外的深度信息是不确定的，可能包含无效的深度值。
+在边界外采样时，深度比较的结果是不可预测的，导致阴影效果异常。
+因为阴影图集存在复用图集中的图块的情况，所以如果，没有进行正确的边界检测，就会在图块边界外采样，导致采样到错误的阴影。
+影响： 导致阴影效果不一致，出现阴影超出或缺失，以及边界采样异常。
+4. 多光源阴影图集问题：
+
+问题： 如果只有一个投射阴影的光源，结果会被钳制（clamped），否则采样会跨越图块边界，一个光源使用另一个光源的阴影。
+原因：
+当使用阴影图集存储多个光源的阴影贴图时，每个光源的阴影贴图被存储在一个小块（tile）中。
+如果没有正确处理图块边界，采样可能会跨越边界，导致一个光源错误地使用另一个光源的阴影。
+如果只有一个光源，那么在图集边界外进行采样，unity的采样器，会对采样结果进行钳制，保证采样结果在0-1之间。
+影响： 导致多光源阴影效果错误，出现光源之间阴影相互干扰。
+总结：
+
+这些问题都是由于阴影映射技术的固有局限性导致的，特别是阴影贴图的有限分辨率和采样问题。为了解决这些问题，需要使用更复杂的阴影映射技术，例如：
+
+更高的阴影贴图分辨率： 提高阴影贴图的分辨率可以减少自阴影伪影，但会增加性能开销。
+阴影偏移（Shadow Bias）： 调整深度比较的偏移量，减少自阴影。
+级联阴影映射（Cascaded Shadow Maps，CSM）： 根据摄像机距离，使用不同分辨率的阴影贴图，提高远距离阴影的精度。
+阴影过滤（Shadow Filtering）： 使用过滤技术，平滑阴影边缘，减少锯齿感。
+正确的边界处理： 正确处理阴影图集的边界，避免边界采样问题。
+
+
+（7）阴影的优化和修正：级联阴影贴图Cascaded Shadow Maps和阴影质量调整
+级联：
+	本质上就是根据渲染距离调整分辨率，将原本一张贴图的显存分成4块，给不同距离的像素使用。
+	级联可以提供一个宏观的阴影细节。
+判定属于哪个级联：
+	需要在gpu中计算顶点属于哪个culling spheres
+	计算世界空间下像素坐标和球心的距离，遍历所有的cullingspere半径去判定。超过最后一个球的不计算阴影。
+
+Fade效果：为更远的阴影添加一个下降参数
+
+culling bias：
+手动提供一个因子让spere计算的时候尽可能减少重复计算同一个物体的caster，
+只要保证这个物体完整的被一个spere包围
+
+（8）其他问题
+问题1 shadow acne：（主要是注意normal bias） 本质是纹理分辨率不够
+	根本原因：贴图认为一个像素（覆盖的区域）的深度都是一个值
+	假如实际模型表面和太阳的角度非常大，那么一个像素覆盖的区域的深度差别可能很大
+	这就产生了很大的自遮挡现象。
+
+第一个解决方法：添加一个随着光源-表面夹角动态变化的bias
+	unity提供
+	产生的新问题：bias过大导致阴影消失。
+	处理：使用更复杂而精细的bias
+
+第二类解决方法：一些和阴影贴图数据有关的方法：（尤其是normal bias）
+	cascade bias：
+		根据所在级联的半径倒数的平方对阴影强度进行衰减（这里提供了一个宏观的阴影细节）
+
+	normal bias：
+		本质上说，自遮挡产生自阴影贴图的一个像素覆盖了多个fragment
+		所以我们可以在采样阴影时“膨胀”表面，即在表面法线方向上偏移表面位置。
+		膨胀的程度由该级联的区域大小——纹理像素在世界空间的大小决定
+		纹理像素越大，物体膨胀的越大
+
+	configurable bias：
+		最终还是需要为normal bias添加修正量。
+
+问题2 Shadow Pancaking
+	产生原因：为了提高深度贴图的精度，unity会尽量调整虚拟相机的近平面来压缩视锥体
+	这可能导致有一部分本应该有阴影的像素被错误的裁剪
+	
+解决：调整近平面滑块
+
+问题3 抗锯齿和软阴影 PCF和PCSS（filter）
+	 PCF的做法：拿到多个0/1，用一个卷积核取均值；可以加权
+	阴影软的程度：和遮挡物越远越软。light越大越软（一个相似三角形）
+	下一个问题：
+		平均遮挡物深度（Average Blocker Depth）：
+		area多大：可以light做一个投影
+		为了减少噪声和提高阴影质量，PCSS 通常不是只找到一个遮挡物，而是计算搜索区域内所有遮挡物的平均深度。
+		这可以通过对搜索区域内的深度值进行采样和平均来实现。
+		优化：SAT表（二维前缀和）
+
+
+	问题：pcss需要确定block area，以及卷积一圈的贴图采样，开销比较大
+		注意，pcf太大也类似“一个阴影贴图像素太大”导致acne问题，
+		这意味着需要根据filtersize大小调整normal bias
+
+另一种方法：基于方差的方法：
+	估计一个概率：即当前区域的深度像素值有多大的概率小于实际深度
+	故我们假设区域深度值符合一个分布
+
+
+问题4 级联和pcf综合导致的问题：
+	pcf会在不同级联的交接处对不同的阴影贴图采样，产生非常明显的边界效应。
+
+解法1：暴力计算相邻两个级联，用fade去blend两个级联的结果。
+解法2：引入抖动（Dithered Transition）
+	抖动混合通过一种概率性的方式，动态选择采样哪个级联，实现了单级联采样。
+	抖动值生成的点状噪声图案，导致过渡区域的阴影呈现点状混合效果。
+
+
+5 Baked Light （低维预先计算）
+
+理论部分：
+环境光照贴图（IBL）
+Split Sum：
+	把渲染方程拆成光照信息积分 + BRDF的积分
+	stage1 光照积分PreFiltering + sample：
+		非常聪明的一种做法，即先让每个点能代表一篇区域的均值，实时渲染时只用做贴图上的采样。
+		这就不用做pathTrace采样了
+	stage2 BRDF的处理：
+		这里有非常多的近似算法，如微表面模型的近似算法：菲涅尔+mask+法线分布
+		参数空间：表面的反射率+粗糙程度+入射角；
+			反射率+入射角 = 菲涅尔项的近似，
+			粗糙程度+入射角 = 法线分布的近似；
+		问题：这里有3个维度，难以接受；
+		解决方法：一些数学处理，把反射率拆出来了——就可以做二维贴图采样了！
+		即Roughness + 入射角的一张纹理 
+
+（1） 静态物体的光照积分贴图近似 + 贴图采样：（diffuse）
+Baked Shadow Light
+	many-light problem: 显然无法做到每个光源生成一个shadow map
+	总得来说，实时渲染的阴影非常难做
+	Visible-重要性非常难以得到 
+	一个最经典的方法：
+		选择一个最重要的光源，只生成它的阴影 Shadow Pancaking
+
+unity：
+获得贴图：
+	mixed-mode：real-time + baked，只考虑间接光，比如往往深刻受到天空盒的影响
+	baked：直接光+间接光，会比混合模式亮很多
+
+对贴图采样：
+	一些unity预设的编译选项和宏
+	在pipline设定vertex具备光照纹理数据perdata-
+	正确的纹理坐标trans处理-
+	指定贴图（约定名字unity_Lightmap）和采样器传递给库函数
+
+（2）Light Probe：让动态物体受到静态漫反射贴图的影响。
+	本质：为了给动态物体提供更多光照信息所设置的虚拟物体。
+
+	光照探针组用于在场景中放置和管理光照探针。
+	Unity 使用四面体体积网格来连接探针，并对顶点探针数据进行插值。
+	动态对象通过插值计算，获得基于其位置的光照近似。
+	如果对象位于探针覆盖范围外，可能会出现光照异常。
+	Unity 提供了光照探针可视化功能，方便开发者调试和优化光照效果。
+	这里的探针使用的是球谐函数模拟：!
+
+
+	上面的代码修改成：
+		如果打开了光照贴图——直接读贴图；不然用光照探针采样。
+
+(3) LPPV(Light Probe Proxy Volumes)
+	LPPV 则专注于单个大型动态对象，为其提供局部化的光照信息。
+	3D 网格结构：
+	LPPV 生成的是一个 3D 插值光照探针网格，而常规光照探针组则使用四面体体积网格进行插值。
+	3D 网格结构更适合表示大型对象的内部光照变化。
+	更高精度：
+	由于 LPPV 在对象内部生成更密集的探针网格，因此能够提供更高的光照精度。
+	从具体的采样方式来看：SampleProbeVolumeSH4(
+				TEXTURE3D_ARGS(unity_ProbeVolumeSH, samplerunity_ProbeVolumeSH),
+				surfaceWS.position, surfaceWS.normal,
+				unity_ProbeVolumeWorldToObject,
+				unity_ProbeVolumeParams.y, unity_ProbeVolumeParams.z,
+				unity_ProbeVolumeMin.xyz, unity_ProbeVolumeSizeInv.xyz
+			);
+	LPPV的实现大概是存储的是球形谐波函数系数，（类似立方体贴图）
+
+(4)Surface
+	以上的做法都只是简单的采样出环境光信息直接赋予color（diffuse）
+	但实际光照的效果应该考虑表面的性质。
+	所以，在bake之前，需要一个特殊的pass为bake提供正确的物体表面信息以及自发光信息。
+
